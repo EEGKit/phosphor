@@ -9,6 +9,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QToolTip, QVBoxLayout, QWidget
 
 from .constants import CHANNEL_COLORS
+from .overlays import ChannelLabelOverlay, ScaleBarOverlay
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,20 @@ class ChannelPlotWidget(QWidget):
         # _buffer is set by the subclass before calling _init_rendering()
         self._buffer = None
 
+        # Overlays, created on demand. Kept as None until asked for so a plot
+        # that never wants them pays nothing.
+        self._label_overlay: ChannelLabelOverlay | None = None
+        self._scale_bar_overlay: ScaleBarOverlay | None = None
+        # Cached world->screen-y projection, keyed on the inputs that can change
+        # it. map_world_to_screen is a pygfx round-trip; at 60 fps it is worth
+        # not repeating while nothing has moved.
+        self._projection: tuple[float, float] | None = None
+        self._projection_key: tuple | None = None
+        self._scale_bar_text: str = ""
+        # Identity of the label list last pushed to the overlay, so a relabel
+        # via update_config is picked up without copying the list every frame.
+        self._label_source: object = None
+
     # ------------------------------------------------------------------
     # Subclass hook: call after buffer is ready
     # ------------------------------------------------------------------
@@ -124,6 +139,132 @@ class ChannelPlotWidget(QWidget):
         self._update_graphics()
         if self._autoscale_enabled:
             self._apply_auto_scale()
+        self._sync_overlays()
+
+    # ------------------------------------------------------------------
+    # Overlays
+    # ------------------------------------------------------------------
+
+    def set_channel_labels_visible(self, visible: bool) -> None:
+        """Show or hide per-trace identifiers drawn over the canvas.
+
+        Uses the ``channel_labels`` the plot was configured with. Positioning
+        and font sizing follow the live camera, so labels stay on their traces
+        as the user scrolls, pages, or zooms.
+        """
+        if not visible:
+            if self._label_overlay is not None:
+                self._label_overlay.hide()
+            return
+        if self._label_overlay is None:
+            self._label_overlay = ChannelLabelOverlay(self._fpl_widget)
+            self._label_overlay.setGeometry(self._fpl_widget.rect())
+        self._push_channel_labels()
+        self._label_overlay.show()
+        self._label_overlay.raise_()
+        self._sync_overlays()
+
+    def set_scale_bar_text(self, text: str | None) -> None:
+        """Show a calibration bar one row-height tall, labelled *text*.
+
+        The caller supplies the text because what a row-height means depends on
+        the signal's units, which this widget does not know. ``None`` or an
+        empty string hides the bar.
+        """
+        if not text:
+            if self._scale_bar_overlay is not None:
+                self._scale_bar_overlay.set_bar(0.0, "")
+                self._scale_bar_overlay.hide()
+            return
+        if self._scale_bar_overlay is None:
+            self._scale_bar_overlay = ScaleBarOverlay(self._fpl_widget)
+            self._scale_bar_overlay.setGeometry(self._fpl_widget.rect())
+        self._scale_bar_text = text
+        self._scale_bar_overlay.show()
+        self._scale_bar_overlay.raise_()
+        self._sync_overlays()
+
+    def _push_channel_labels(self) -> None:
+        """Forward the plot's labels to the overlay when they have been replaced.
+
+        Keyed on identity rather than value: update_config swaps the list, and
+        comparing 256 strings every frame to notice would cost more than the
+        feature does.
+        """
+        if self._label_overlay is None or self._channel_labels is self._label_source:
+            return
+        self._label_source = self._channel_labels
+        self._label_overlay.set_labels(list(self._channel_labels or []))
+
+    def _screen_y_projection(self) -> tuple[float | None, float | None]:
+        """Affine ``screen_y = y0 + slope * world_y`` for the current camera.
+
+        Returns ``(None, None)`` if the camera cannot be probed, which the
+        overlay handles by falling back to its analytic layout.
+        """
+        subplot = getattr(self, "_subplot", None)
+        if subplot is None:
+            return None, None
+        buf = self._buffer
+        size = self._fpl_widget.size()
+        camera = getattr(subplot, "camera", None)
+        key = (
+            size.width(),
+            size.height(),
+            getattr(buf, "n_visible", None),
+            getattr(self, "_z_offset_scale", 1.0),
+            float(camera.height) if camera is not None else None,
+            float(camera.world.position[1]) if camera is not None else None,
+        )
+        if self._projection is not None and key == self._projection_key:
+            return self._projection
+
+        try:
+            # x is irrelevant to screen-y for the axis-aligned ortho camera.
+            y_at_0 = float(subplot.map_world_to_screen((0.0, 0.0, 0.0))[1])
+            y_at_1 = float(subplot.map_world_to_screen((0.0, 1.0, 0.0))[1])
+        except Exception:  # noqa: BLE001 - pygfx call with no enumerated failures
+            # In a paint path: losing the labels' precise placement is better
+            # than losing the frame.
+            logger.debug("map_world_to_screen failed; overlays fall back to analytic layout", exc_info=True)
+            return None, None
+
+        self._projection = (y_at_0, y_at_1 - y_at_0)
+        self._projection_key = key
+        return self._projection
+
+    def _sync_overlays(self) -> None:
+        """Keep overlays sized to the canvas and in step with the view."""
+        if self._label_overlay is None and self._scale_bar_overlay is None:
+            return
+        rect = self._fpl_widget.rect()
+        for overlay in (self._label_overlay, self._scale_bar_overlay):
+            if overlay is not None and overlay.size() != self._fpl_widget.size():
+                overlay.setGeometry(rect)
+
+        buf = self._buffer
+        if buf is None:
+            return
+        y0, slope = self._screen_y_projection()
+        z_scale = getattr(self, "_z_offset_scale", 1.0) or 1.0
+
+        if self._label_overlay is not None:
+            self._push_channel_labels()
+            self._label_overlay.set_view(
+                getattr(buf, "channel_offset", 0),
+                getattr(buf, "n_visible", 0),
+                getattr(buf, "channel_order", "top_down") == "top_down",
+                y0,
+                slope,
+                z_scale,
+            )
+
+        if self._scale_bar_overlay is not None:
+            text = self._scale_bar_text
+            # A row spans ±0.5 in normalized units, so half a row's world
+            # distance is the bar the caller's text describes.
+            length = 0.0 if slope is None else 0.5 * abs(slope)
+            self._scale_bar_overlay.set_bar(length, text)
 
     # ------------------------------------------------------------------
     # Event handlers (fpl native events)
