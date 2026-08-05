@@ -24,8 +24,13 @@ __all__ = ["ChannelLabelOverlay", "ScaleBarOverlay"]
 
 # Font size bounds in pixels. Between them the label is scaled to about half the
 # per-trace spacing, so it reads as centred in its row.
+#
+# The upper bound is not cosmetic. Each label sits on an opaque chip, so at a
+# low channel count -- where rows are hundreds of pixels tall -- scaling with the
+# row would paint a large block over the very signal the label refers to. Past
+# ordinary reading size a bigger label conveys nothing, so it stops growing.
 MIN_LABEL_FONT_PX = 8
-MAX_LABEL_FONT_PX = 40
+MAX_LABEL_FONT_PX = 14
 
 LABEL_TEXT_COLOR = (205, 205, 210)
 LABEL_CHIP_COLOR = (25, 25, 30, 185)
@@ -58,8 +63,16 @@ class ChannelLabelOverlay(_CanvasOverlay):
     channel so scrolling needs no reslicing by the caller.
     """
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        min_font_px: int = MIN_LABEL_FONT_PX,
+        max_font_px: int = MAX_LABEL_FONT_PX,
+    ) -> None:
         super().__init__(parent)
+        self._min_font_px = int(min_font_px)
+        self._max_font_px = int(max_font_px)
         self._labels: list[str] = []
         self._offset = 0
         self._n_visible = 0
@@ -131,7 +144,7 @@ class ChannelLabelOverlay(_CanvasOverlay):
         row_span_px = abs(slope * z)
         if row_span_px <= 0:
             return
-        font_px = max(MIN_LABEL_FONT_PX, min(round(float(0.5 * row_span_px)), MAX_LABEL_FONT_PX))
+        font_px = max(self._min_font_px, min(round(float(0.5 * row_span_px)), self._max_font_px))
 
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.TextAntialiasing)

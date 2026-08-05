@@ -145,12 +145,21 @@ class ChannelPlotWidget(QWidget):
     # Overlays
     # ------------------------------------------------------------------
 
+    @property
+    def channel_labels_visible(self) -> bool:
+        """Whether per-trace identifiers are currently drawn."""
+        return self._label_overlay is not None and self._label_overlay.isVisible()
+
     def set_channel_labels_visible(self, visible: bool) -> None:
         """Show or hide per-trace identifiers drawn over the canvas.
 
         Uses the ``channel_labels`` the plot was configured with. Positioning
         and font sizing follow the live camera, so labels stay on their traces
         as the user scrolls, pages, or zooms.
+
+        Worth having a way to turn off: the labels sit on opaque chips, so on a
+        dense trace they cover signal, and once the user knows which channel is
+        which they mostly want them gone.
         """
         if not visible:
             if self._label_overlay is not None:

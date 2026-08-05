@@ -126,6 +126,37 @@ def test_label_paint_survives_extremes(labels):
 
 def test_font_bounds_are_sane():
     assert 0 < MIN_LABEL_FONT_PX < MAX_LABEL_FONT_PX
+    # Ordinary reading size. Bigger conveys nothing and the opaque chip behind
+    # each label would cover the signal it refers to.
+    assert MAX_LABEL_FONT_PX <= 16
+
+
+def test_font_is_capped_on_tall_rows(qapp, monkeypatch):
+    """Few visible channels means rows hundreds of pixels tall; the label must
+    not scale with them."""
+    from PySide6 import QtGui
+
+    sizes = []
+    original = QtGui.QPainter.setFont
+
+    def spy(self, font):
+        sizes.append(font.pixelSize())
+        return original(self, font)
+
+    monkeypatch.setattr(QtGui.QPainter, "setFont", spy)
+
+    ov = ChannelLabelOverlay()
+    ov.resize(400, 1000)
+    ov.set_labels(["ch0", "ch1"])
+    ov.set_view(0, 2, True, 1000.0, -500.0, 1.0)  # 500 px rows
+    ov.grab()
+
+    assert sizes and max(sizes) <= MAX_LABEL_FONT_PX
+
+
+def test_font_bounds_are_overridable(qapp):
+    ov = ChannelLabelOverlay(min_font_px=6, max_font_px=9)
+    assert (ov._min_font_px, ov._max_font_px) == (6, 9)
 
 
 def test_labels_are_indexed_by_absolute_channel(labels, monkeypatch):

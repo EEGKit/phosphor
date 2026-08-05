@@ -114,6 +114,17 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
         self._btn_auto.setToolTip("Toggle camera autoscale (key: A)")
         self._btn_auto.toggled.connect(self._on_auto_toggled)
         layout.addWidget(self._btn_auto)
+
+        # Channel-label toggle. The labels sit on opaque chips, so on a dense
+        # trace they cover signal; once the user knows which channel is which,
+        # they mostly want them gone.
+        self._btn_labels = QtWidgets.QToolButton()
+        self._btn_labels.setText("Labels")
+        self._btn_labels.setCheckable(True)
+        self._btn_labels.setChecked(plot.channel_labels_visible)
+        self._btn_labels.setToolTip("Show per-channel labels over the traces")
+        self._btn_labels.toggled.connect(self._plot.set_channel_labels_visible)
+        layout.addWidget(self._btn_labels)
         self._mark_slot("autoscale", layout)
 
         self.add_controls(layout)
@@ -242,3 +253,7 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
             self._btn_auto.blockSignals(True)
             self._btn_auto.setChecked(self._plot._autoscale_enabled)
             self._btn_auto.blockSignals(False)
+        if self._btn_labels.isChecked() != self._plot.channel_labels_visible:
+            self._btn_labels.blockSignals(True)
+            self._btn_labels.setChecked(self._plot.channel_labels_visible)
+            self._btn_labels.blockSignals(False)
