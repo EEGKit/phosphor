@@ -184,3 +184,39 @@ def test_labels_are_indexed_by_absolute_channel(labels, monkeypatch):
     labels.set_view(10, 4, True, 300.0, -75.0, 1.0)
     labels.grab()
     assert drawn == ["ch10", "ch11", "ch12", "ch13"]
+
+
+def test_scale_bar_sits_in_the_lower_right(bar, monkeypatch):
+    """Out of the way of the traces, and anchored at its foot so the bottom
+    edge does not move when the amplitude scale changes."""
+    from PySide6 import QtGui
+
+    from phosphor.overlays import SCALE_BAR_BOTTOM_MARGIN, SCALE_BAR_RIGHT_MARGIN
+
+    lines: list[tuple] = []
+    original = QtGui.QPainter.drawLine
+
+    def spy(self, *args):
+        lines.append(args)
+        return original(self, *args)
+
+    monkeypatch.setattr(QtGui.QPainter, "drawLine", spy)
+
+    w, h = bar.width(), bar.height()
+    bar.set_bar(60.0, "100 uV")
+    bar.grab()
+
+    # First drawLine is the vertical bar: (x, y_top, x, y_bot).
+    x, y_top, _, y_bot = lines[0]
+    assert x == w - SCALE_BAR_RIGHT_MARGIN
+    assert y_bot == h - SCALE_BAR_BOTTOM_MARGIN
+    assert y_bot - y_top == pytest.approx(60.0, abs=1)
+    assert y_top > h / 2, "bar should sit below the vertical midpoint"
+
+    # Growing the bar moves its top, not its foot.
+    lines.clear()
+    bar.set_bar(120.0, "200 uV")
+    bar.grab()
+    _, y_top2, _, y_bot2 = lines[0]
+    assert y_bot2 == y_bot
+    assert y_top2 < y_top

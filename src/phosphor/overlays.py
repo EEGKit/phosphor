@@ -37,6 +37,10 @@ LABEL_CHIP_COLOR = (25, 25, 30, 185)
 
 # Scale bar layout, in canvas pixels.
 SCALE_BAR_RIGHT_MARGIN = 14
+# Gap from the bar's foot to the bottom of the canvas. The bar sits down here
+# rather than centred because the middle of the plot is where the traces are;
+# a calibration mark belongs out of the way, in the corner, like a map's.
+SCALE_BAR_BOTTOM_MARGIN = 24
 SCALE_BAR_SERIF_HALF = 4
 SCALE_BAR_TEXT_GAP = 6
 SCALE_BAR_MIN_DRAW_PX = 1.0
@@ -215,9 +219,12 @@ class ScaleBarOverlay(_CanvasOverlay):
             return
 
         x = w - SCALE_BAR_RIGHT_MARGIN
-        y_center = h / 2.0
-        y_top = y_center - length / 2.0
-        y_bot = y_center + length / 2.0
+        # Anchored at its foot, growing upward: the bottom edge stays put as the
+        # amplitude scale changes, so the bar reads as a ruler standing on the
+        # canvas floor rather than something that drifts when you zoom.
+        y_bot = h - SCALE_BAR_BOTTOM_MARGIN
+        y_top = y_bot - length
+        y_center = (y_top + y_bot) / 2.0
 
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
