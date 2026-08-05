@@ -145,6 +145,16 @@ class ChannelPlotWidget(QWidget):
     # Overlays
     # ------------------------------------------------------------------
 
+    def set_channel_labels(self, labels: list[str] | None) -> None:
+        """Replace the per-channel labels used by the tooltip and the overlay.
+
+        Labels often arrive after the plot is built -- a source announces its
+        channel names on its own schedule -- so this exists to avoid callers
+        assigning to ``_channel_labels`` and hoping the overlay notices.
+        """
+        self._channel_labels = list(labels) if labels is not None else None
+        self._push_channel_labels()
+
     @property
     def channel_labels_visible(self) -> bool:
         """Whether per-trace identifiers are currently drawn."""
