@@ -29,7 +29,12 @@ class SweepBuffer:
         max_events: int = DEFAULT_MAX_EVENTS,
         channel_order: str = "top_down",
         amplitude_scale: float = 1.0,
+        envelope: bool = False,
     ):
+        # When True, pushed data is ``(n_samples, n_channels, 2)`` -- a
+        # already-reduced (min, max) pair per sample rather than a raw value.
+        # See :meth:`push_data`.
+        self.envelope = bool(envelope)
         self.n_channels = n_channels
         self.srate = srate
         self.display_dur = display_dur
@@ -69,7 +74,10 @@ class SweepBuffer:
         self.n_columns = min(self._configured_n_columns, self.total_raw_samples)
         self.samples_per_column = self.total_raw_samples / self.n_columns
 
-        self.raw_buffer = np.zeros((self.total_raw_samples, self.n_visible), dtype=np.float32)
+        raw_shape = (self.total_raw_samples, self.n_visible)
+        if self.envelope:
+            raw_shape += (2,)
+        self.raw_buffer = np.zeros(raw_shape, dtype=np.float32)
         self.display_mins = np.zeros((self.n_columns, self.n_visible), dtype=np.float32)
         self.display_maxs = np.zeros((self.n_columns, self.n_visible), dtype=np.float32)
 
@@ -91,6 +99,21 @@ class SweepBuffer:
     def push_data(self, data: np.ndarray, timestamps=None) -> None:
         """Push new samples. data shape: (n_samples, n_channels). Thread-safe.
 
+        In ``envelope`` mode the shape is ``(n_samples, n_channels, 2)``, where
+        the trailing pair is an already-reduced ``(min, max)`` for that sample's
+        interval. That is the shape a min/max decimator upstream produces, and
+        feeding it here means the reduction happens once, near the source,
+        instead of shipping the full-rate signal across a process boundary only
+        to discard most of it. Column reduction then takes the min of the mins
+        and the max of the maxes, which is the same envelope at a coarser
+        resolution -- so the display is identical to what the raw signal would
+        have drawn, as long as the upstream buckets are finer than a column.
+
+        The buffer's ``srate`` describes the stream being pushed, so in envelope
+        mode it is the *bucket* rate, not the rate before decimation. Sizing
+        from the pre-decimation rate would make the ring ``factor`` times longer
+        than the data arriving to fill it, and the sweep would sit mostly empty.
+
         *timestamps* sets the time basis for event alignment:
 
         - ``None`` — elapsed time increments by ``n_samples / srate``.
@@ -103,14 +126,26 @@ class SweepBuffer:
             return
 
         with self._lock:
-            n_samples = data.shape[0]
-            n_ch = data.shape[1] if data.ndim > 1 else 1
-            if data.ndim == 1:
+            if self.envelope:
+                if data.ndim != 3 or data.shape[2] != 2:
+                    raise ValueError(
+                        f"envelope buffer expects (n_samples, n_channels, 2), got {data.shape}. "
+                        "Build the buffer with envelope=False to push raw samples."
+                    )
+            elif data.ndim == 1:
                 data = data[:, np.newaxis]
+            elif data.ndim != 2:
+                raise ValueError(f"expected (n_samples, n_channels), got {data.shape}. Did you mean envelope=True?")
 
-            # Handle channel count mismatch
+            n_samples = data.shape[0]
+            n_ch = data.shape[1]
+
+            # Handle channel count mismatch. Pad/trim the channel axis only;
+            # any trailing envelope axis rides along untouched.
             if n_ch < self.n_channels:
-                data = np.pad(data, ((0, 0), (0, self.n_channels - n_ch)))
+                pad = [(0, 0)] * data.ndim
+                pad[1] = (0, self.n_channels - n_ch)
+                data = np.pad(data, pad)
             elif n_ch > self.n_channels:
                 data = data[:, : self.n_channels]
 
@@ -118,7 +153,9 @@ class SweepBuffer:
             end_ch = min(self.channel_offset + self.n_visible, self.n_channels)
             vis_data = data[:, self.channel_offset : end_ch].astype(np.float32)
             if vis_data.shape[1] < self.n_visible:
-                vis_data = np.pad(vis_data, ((0, 0), (0, self.n_visible - vis_data.shape[1])))
+                pad = [(0, 0)] * vis_data.ndim
+                pad[1] = (0, self.n_visible - vis_data.shape[1])
+                vis_data = np.pad(vis_data, pad)
 
             # Truncate if more data than one full sweep
             if n_samples > self.total_raw_samples:
@@ -202,6 +239,18 @@ class SweepBuffer:
         with self._lock:
             if srate != self.srate:
                 self.srate = srate
+                self._allocate()
+
+    def set_envelope(self, envelope: bool) -> None:
+        """Switch between raw and pre-reduced (min, max) input.
+
+        Reallocates, since the raw buffer changes rank -- so whatever is
+        currently displayed is discarded. Only worth calling when the source
+        itself changed shape.
+        """
+        with self._lock:
+            if bool(envelope) != self.envelope:
+                self.envelope = bool(envelope)
                 self._allocate()
 
     # ------------------------------------------------------------------
@@ -380,8 +429,15 @@ class SweepBuffer:
                 chunk = self.raw_buffer[start:end]
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", RuntimeWarning)
-                    mins = np.nanmin(chunk, axis=0)
-                    maxs = np.nanmax(chunk, axis=0)
+                    if self.envelope:
+                        # Min over the lower bounds, max over the upper ones --
+                        # the same envelope this column would have had from raw
+                        # samples, provided the upstream buckets are finer.
+                        mins = np.nanmin(chunk[..., 0], axis=0)
+                        maxs = np.nanmax(chunk[..., 1], axis=0)
+                    else:
+                        mins = np.nanmin(chunk, axis=0)
+                        maxs = np.nanmax(chunk, axis=0)
                 # Replace NaN results (all-NaN columns) with 0
                 self.display_mins[col] = np.nan_to_num(mins, nan=0.0)
                 self.display_maxs[col] = np.nan_to_num(maxs, nan=0.0)

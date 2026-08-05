@@ -54,6 +54,12 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
         layout.setContentsMargins(2, 1, 2, 1)
         layout.setSpacing(3)
 
+        # Named insertion points, so a subclass can put its own widgets next to
+        # the group they belong with. Without these the only way to extend this
+        # toolbar is to scan the layout for a QLabel with the right text, which
+        # breaks the moment a label is renamed or reordered.
+        self._slots: dict[str, int] = {}
+
         # Channel scrolling: up/down by one, and page up/down by n_visible.
         layout.addWidget(self._make_label("Channel"))
         self._btn_ch_up = self._make_button("\u2191", "Scroll up one channel", self._on_ch_up)
@@ -64,6 +70,7 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
         layout.addWidget(self._btn_ch_down)
         layout.addWidget(self._btn_pg_up)
         layout.addWidget(self._btn_pg_down)
+        self._mark_slot("channel", layout)
 
         layout.addWidget(self._make_separator())
 
@@ -79,6 +86,7 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
         layout.addWidget(self._spin_visible)
         layout.addWidget(self._make_button("/2", "Halve visible channels", self._on_visible_halve))
         layout.addWidget(self._make_button("x2", "Double visible channels", self._on_visible_double))
+        self._mark_slot("visible", layout)
 
         layout.addWidget(self._make_separator())
 
@@ -86,6 +94,7 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
         layout.addWidget(self._make_label("Amplitude"))
         layout.addWidget(self._make_button("\u2212", "Shrink amplitude", lambda: self._plot._zoom_amplitude(0.8)))
         layout.addWidget(self._make_button("+", "Grow amplitude", lambda: self._plot._zoom_amplitude(1.25)))
+        self._mark_slot("amplitude", layout)
 
         # Time zoom — only present if the plot supports it (sweep / spectrum).
         if hasattr(plot, "_time_zoom"):
@@ -93,6 +102,7 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
             layout.addWidget(self._make_label("Time"))
             layout.addWidget(self._make_button("\u2212", "Zoom time out (longer span)", lambda: plot._time_zoom(2.0)))
             layout.addWidget(self._make_button("+", "Zoom time in (shorter span)", lambda: plot._time_zoom(0.5)))
+            self._mark_slot("time", layout)
 
         layout.addWidget(self._make_separator())
 
@@ -104,8 +114,11 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
         self._btn_auto.setToolTip("Toggle camera autoscale (key: A)")
         self._btn_auto.toggled.connect(self._on_auto_toggled)
         layout.addWidget(self._btn_auto)
+        self._mark_slot("autoscale", layout)
 
+        self.add_controls(layout)
         layout.addStretch(1)
+        self._mark_slot("end", layout)
 
         # Periodically resync widget state with the buffer (other inputs —
         # keyboard, mouse — also mutate it). 200 ms is plenty for a panel.
@@ -113,6 +126,40 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
         self._sync_timer.setInterval(200)
         self._sync_timer.timeout.connect(self._sync_from_buffer)
         self._sync_timer.start()
+
+    # ---- extension points ---------------------------------------------
+
+    def add_controls(self, layout: QtWidgets.QHBoxLayout) -> None:
+        """Append subclass widgets, before the trailing stretch.
+
+        Called once during ``__init__``. Override for controls that belong at
+        the end of the bar; use :meth:`insert_after` for ones that belong beside
+        an existing group.
+        """
+
+    def insert_after(self, slot: str, widget: QtWidgets.QWidget) -> None:
+        """Insert *widget* immediately after a named group.
+
+        Slots are ``"channel"``, ``"visible"``, ``"amplitude"``, ``"time"``
+        (absent unless the plot supports time zoom), ``"autoscale"``, and
+        ``"end"``. Later slots shift as earlier ones grow, so inserting is
+        order-independent.
+
+        :raises KeyError: for an unknown slot, naming the ones that exist --
+            silently dropping the widget would be worse, and ``"time"``
+            genuinely is conditional.
+        """
+        if slot not in self._slots:
+            raise KeyError(f"unknown control slot {slot!r}; available: {sorted(self._slots)}")
+        index = self._slots[slot]
+        self.layout().insertWidget(index, widget)
+        for name, pos in self._slots.items():
+            if pos >= index:
+                self._slots[name] = pos + 1
+
+    def _mark_slot(self, name: str, layout: QtWidgets.QHBoxLayout) -> None:
+        """Record the current end of *layout* as the named insertion point."""
+        self._slots[name] = layout.count()
 
     # ---- helpers ------------------------------------------------------
 

@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+
 import fastplotlib as fpl
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QToolTip, QVBoxLayout, QWidget
 
 from .constants import CHANNEL_COLORS
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["ChannelPlotWidget"]
 
@@ -194,6 +198,36 @@ class ChannelPlotWidget(QWidget):
             self._renderer.remove_event_handler(self._on_wheel_event, "wheel")
             self._renderer.remove_event_handler(self._on_pointer_move_event, "pointer_move")
 
+    def set_max_fps(self, fps: float | None) -> None:
+        """Cap the canvas render rate.
+
+        A scrolling trace reads smooth well below the display refresh, and
+        render cost falls roughly in proportion, so this is the cheapest
+        performance knob a caller has. ``None`` leaves whatever rendercanvas
+        was already doing; ``fps <= 0`` uncaps (``update_mode="fastest"``).
+
+        Safe to call before or after the canvas exists; a backend that predates
+        ``set_update_mode`` is warned about once and otherwise ignored, since
+        losing the cap is a performance regression rather than a broken plot.
+        """
+        if fps is None:
+            return
+        canvas = getattr(self._figure, "canvas", None)
+        set_update_mode = getattr(canvas, "set_update_mode", None)
+        if set_update_mode is None:
+            logger.warning("Canvas has no set_update_mode; leaving the render rate at its default.")
+            return
+        try:
+            if fps <= 0:
+                set_update_mode("fastest")
+            else:
+                # "continuous" is the mode that honours max_fps; "ondemand"
+                # ignores it and redraws only on events, which a live sweep
+                # would then never do.
+                set_update_mode("continuous", max_fps=float(fps))
+        except Exception:
+            logger.exception("Failed to set the canvas render rate; leaving it at its default.")
+
     # ------------------------------------------------------------------
     # Amplitude zoom helper
     # ------------------------------------------------------------------
@@ -245,7 +279,7 @@ class ChannelPlotWidget(QWidget):
         label = labels[abs_ch] if labels and abs_ch < len(labels) else f"Ch {abs_ch}"
 
         rgba = CHANNEL_COLORS[ch_index % len(CHANNEL_COLORS)]
-        hex_color = f"#{int(rgba[0]*255):02x}{int(rgba[1]*255):02x}{int(rgba[2]*255):02x}"
+        hex_color = f"#{int(rgba[0] * 255):02x}{int(rgba[1] * 255):02x}{int(rgba[2] * 255):02x}"
         html = f'<span style="color:{hex_color}">\u25a0</span> {label}'
         from PySide6.QtCore import QPoint
 

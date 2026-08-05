@@ -11,9 +11,11 @@ from .channel_plot import ChannelPlotWidget
 from .constants import (
     CURSOR_COLOR,
     CURSOR_GAP_COLUMNS,
+    CURSOR_THICKNESS,
     DEFAULT_DISPLAY_DUR,
     DEFAULT_LINE_THICKNESS,
     DEFAULT_MAX_EVENTS,
+    DEFAULT_MAX_FPS,
     DEFAULT_N_COLUMNS,
     DEFAULT_N_VISIBLE,
     EVENT_POOL_SIZE,
@@ -46,6 +48,21 @@ class SweepConfig:
     colors: list[tuple[float, float, float, float]] | None = None
     # Initial waveform-amplitude multiplier (1.0 = data autoscale only).
     amplitude_scale: float = 1.0
+    # Pushed data is ``(n_samples, n_channels, 2)`` holding an already-reduced
+    # (min, max) pair per sample, rather than raw values. Lets a producer
+    # decimate near the source -- see ``SweepBuffer.push_data``.
+    envelope: bool = False
+    # Sweeping cursor appearance. phosphor sizes the cursor from the column
+    # gap, which is in time-world units and collapses to about a pixel; these
+    # let a caller ask for something more visible without reaching into the
+    # fastplotlib graphic after every rebuild.
+    cursor_thickness: float = CURSOR_THICKNESS
+    cursor_color: tuple[float, float, float, float] | str = CURSOR_COLOR
+    # Target canvas render rate. A scrolling trace reads smooth well below the
+    # display refresh, and halving the rate roughly halves render cost, so this
+    # is the cheapest knob there is. ``0`` uncaps; ``None`` leaves fastplotlib's
+    # own default alone.
+    max_fps: float | None = DEFAULT_MAX_FPS
 
 
 class SweepWidget(ChannelPlotWidget):
@@ -81,6 +98,7 @@ class SweepWidget(ChannelPlotWidget):
             max_events=config.max_events,
             channel_order=config.channel_order,
             amplitude_scale=config.amplitude_scale,
+            envelope=config.envelope,
         )
         self._buffer = self.sweep_buffer
         self._palette = list(config.colors) if config.colors is not None else list(SOFT_CHANNEL_COLORS)
@@ -97,6 +115,7 @@ class SweepWidget(ChannelPlotWidget):
 
         # Start rendering
         self._init_rendering()
+        self.set_max_fps(config.max_fps)
 
     # ------------------------------------------------------------------
     # Public API
@@ -129,6 +148,9 @@ class SweepWidget(ChannelPlotWidget):
         if config.display_dur != buf.display_dur:
             buf.set_display_dur(config.display_dur)
             self._time_axis.set_range(config.display_dur)
+        if config.envelope != buf.envelope:
+            buf.set_envelope(config.envelope)
+        self.set_max_fps(config.max_fps)
         self._update_range_label()
 
     # ------------------------------------------------------------------
@@ -168,7 +190,12 @@ class SweepWidget(ChannelPlotWidget):
         # Cursor: vertical line at the sweep position.
         # Span the MultiLine's y-extent with small margin.
         sweep_x = buf.sweep_col / max(buf.n_columns - 1, 1) * buf.display_dur
-        cursor_color = CURSOR_COLOR[:3]
+        cursor_color = self._config.cursor_color
+        if isinstance(cursor_color, (tuple, list)):
+            cursor_color = tuple(cursor_color)[:3]
+        # The geometry-derived width is in time-world units and collapses to
+        # about a pixel, so the configured thickness is the floor rather than
+        # the other way round.
         gap_w = CURSOR_GAP_COLUMNS / max(buf.n_columns - 1, 1) * buf.display_dur
         y_bottom = 0.0
         y_top = (n_vis - 1) * self._z_offset_scale
@@ -181,7 +208,7 @@ class SweepWidget(ChannelPlotWidget):
                 dtype=np.float32,
             ),
             colors=cursor_color,
-            thickness=max(1.0, gap_w * 2),
+            thickness=max(self._config.cursor_thickness, gap_w * 2),
         )
 
         self._setup_event_pool()
