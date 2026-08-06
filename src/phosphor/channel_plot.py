@@ -71,6 +71,11 @@ class ChannelPlotWidget(QWidget):
         # _buffer is set by the subclass before calling _init_rendering()
         self._buffer = None
 
+        # Trace colours, indexed by *absolute channel* so a channel keeps its
+        # colour as it scrolls -- see _channel_color. Subclasses override this
+        # with a configured palette before building graphics.
+        self._palette = list(CHANNEL_COLORS)
+
         # Overlays, created on demand. Kept as None until asked for so a plot
         # that never wants them pays nothing.
         self._label_overlay: ChannelLabelOverlay | None = None
@@ -277,7 +282,7 @@ class ChannelPlotWidget(QWidget):
             self._label_overlay.set_view(
                 getattr(buf, "channel_offset", 0),
                 getattr(buf, "n_visible", 0),
-                getattr(buf, "channel_order", "top_down") == "top_down",
+                self._is_top_down(),
                 y0,
                 slope,
                 z_scale,
@@ -330,14 +335,89 @@ class ChannelPlotWidget(QWidget):
             self._on_ctrl_scroll(delta)
         elif "Shift" in getattr(event, "modifiers", ()):
             # Shift+scroll → amplitude zoom
-            factor = 1.1 if delta > 0 else 0.9
-            self._zoom_amplitude(factor)
+            self._zoom_amplitude(1.1 if self._shift_wheel_delta(event) > 0 else 0.9)
         else:
             # Unmodified scroll → channel scroll
-            buf = self._buffer
-            step = 1 if delta < 0 else -1
-            buf.set_channel_offset(buf.channel_offset + step)
-            self._update_range_label()
+            step = self._channel_scroll_step(delta)
+            if step:
+                buf = self._buffer
+                buf.set_channel_offset(buf.channel_offset + step)
+                self._update_range_label()
+
+    # ------------------------------------------------------------------
+    # Row <-> channel mapping
+    # ------------------------------------------------------------------
+    #
+    # A buffer lays its visible rows out along world-y, and "row 0" is the
+    # bottom of the canvas because that is what a plain arange of z-offsets
+    # produces. ``channel_order="top_down"`` reverses which channel lands on
+    # which row, so anything converting between a screen position and a channel
+    # has to go through here -- reading it off as ``channel_offset + row``
+    # silently inverts the answer whenever top_down is in force, which is the
+    # sweep's default.
+
+    def _is_top_down(self) -> bool:
+        """Whether the first visible channel is drawn at the top of the canvas.
+
+        A buffer that does not declare an order (the spectrum) offsets its rows
+        with a plain arange, so *absent* means bottom-up rather than the sweep's
+        default.
+        """
+        return getattr(self._buffer, "channel_order", "bottom_up") == "top_down"
+
+    def _channel_at_row(self, row: int) -> int:
+        """Absolute channel drawn at *row*, counting up from the canvas bottom."""
+        if self._is_top_down():
+            row = self._buffer.n_visible - 1 - row
+        return self._buffer.channel_offset + row
+
+    def _row_of_channel(self, channel: int) -> int:
+        """Row a channel is drawn at, counting up from the canvas bottom."""
+        row = channel - self._buffer.channel_offset
+        if self._is_top_down():
+            row = self._buffer.n_visible - 1 - row
+        return row
+
+    def _channel_color(self, channel: int) -> tuple[float, float, float]:
+        """Palette colour for an absolute channel index, as RGB.
+
+        Keyed to the channel rather than the on-screen row so a trace keeps its
+        colour while the window scrolls past it -- the point of a colour here
+        is to let the eye follow one channel, which a colour that belongs to
+        the row actively defeats.
+        """
+        return tuple(self._palette[channel % len(self._palette)][:3])
+
+    @staticmethod
+    def _shift_wheel_delta(event) -> float:
+        """Wheel motion for Shift+scroll, from whichever axis it arrived on.
+
+        Holding Shift makes the OS report a mouse wheel as *horizontal*
+        scrolling -- the convention that scrolls a document sideways -- so the
+        motion arrives in dx with dy pinned at 0. Reading dy alone then makes
+        every notch look negative and amplitude only ever zooms out. A trackpad
+        reports both axes natively and is unaffected, which is why this shows
+        up on a mouse only.
+        """
+        dy = getattr(event, "dy", 0.0) or 0.0
+        return dy if dy else (getattr(event, "dx", 0.0) or 0.0)
+
+    @staticmethod
+    def _channel_scroll_step(delta: float) -> int:
+        """Channel-offset change for one wheel notch, 0 for no vertical motion.
+
+        Scrolling down moves the window down the channel list, so the traces
+        travel with the fingers the way a document does. Split out from the
+        handler so the direction can be tested without a canvas, since it is
+        the kind of thing that is obvious in use and invisible in review.
+
+        A horizontal trackpad swipe arrives as a wheel event carrying dx with
+        dy at 0, which is why 0 has to mean *stay*: taking it as a direction
+        makes sideways scrolling walk the channel window.
+        """
+        if delta == 0:
+            return 0
+        return 1 if delta > 0 else -1
 
     def _on_pointer_move_event(self, event) -> None:
         self._handle_mouse_move(event)
@@ -431,14 +511,13 @@ class ChannelPlotWidget(QWidget):
                 best_dist = dist
                 best_idx = i
 
-        ch_index = best_idx
-        abs_ch = buf.channel_offset + ch_index
+        abs_ch = self._channel_at_row(best_idx)
 
         labels = self._channel_labels
         label = labels[abs_ch] if labels and abs_ch < len(labels) else f"Ch {abs_ch}"
 
-        rgba = CHANNEL_COLORS[ch_index % len(CHANNEL_COLORS)]
-        hex_color = f"#{int(rgba[0] * 255):02x}{int(rgba[1] * 255):02x}{int(rgba[2] * 255):02x}"
+        rgb = self._channel_color(abs_ch)
+        hex_color = f"#{int(rgb[0] * 255):02x}{int(rgb[1] * 255):02x}{int(rgb[2] * 255):02x}"
         html = f'<span style="color:{hex_color}">\u25a0</span> {label}'
         from PySide6.QtCore import QPoint
 
