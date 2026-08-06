@@ -20,7 +20,7 @@ class ChannelPlotWidget(QWidget):
     """Base widget for fastplotlib-rendered multichannel plots.
 
     Provides canvas setup, channel scrolling (scroll / ↑↓ / PgUp/PgDn / [ ]),
-    amplitude zoom (Shift+scroll / - = A), and range label overlay.
+    amplitude zoom (Shift+scroll / - =), and range label overlay.
 
     Subclass contract:
 
@@ -45,7 +45,6 @@ class ChannelPlotWidget(QWidget):
         super().__init__(parent)
         self._n_channels = n_channels
         self._channel_labels = channel_labels
-        self._autoscale_enabled = True
 
         # Layout
         layout = QVBoxLayout(self)
@@ -125,7 +124,14 @@ class ChannelPlotWidget(QWidget):
         raise NotImplementedError
 
     def _apply_auto_scale(self) -> None:
-        """Set camera to fit content. Override in subclass for fast path."""
+        """Frame the camera on the current content. Override for a fast path.
+
+        Called every frame, unconditionally. It is the only thing that moves
+        the camera -- ``_init_rendering`` disables the pan/zoom controller --
+        so skipping it does not hand control to the user, it strands the view.
+        Time and amplitude zoom work by changing what the data occupies and
+        letting this follow.
+        """
         self._subplot.auto_scale(maintain_aspect=False, zoom=1.0)
 
     def _on_ctrl_scroll(self, delta: float) -> None:
@@ -137,8 +143,7 @@ class ChannelPlotWidget(QWidget):
 
     def _animation_callback(self) -> None:
         self._update_graphics()
-        if self._autoscale_enabled:
-            self._apply_auto_scale()
+        self._apply_auto_scale()
         self._sync_overlays()
 
     # ------------------------------------------------------------------
@@ -315,11 +320,6 @@ class ChannelPlotWidget(QWidget):
         elif key == "=":
             self._zoom_amplitude(1.25)
 
-        elif key in ("a", "A"):
-            self._autoscale_enabled = not self._autoscale_enabled
-            if self._autoscale_enabled:
-                self._apply_auto_scale()
-
         self._update_range_label()
 
     def _on_wheel_event(self, event) -> None:
@@ -405,7 +405,6 @@ class ChannelPlotWidget(QWidget):
             return
         camera = self._subplot.camera
         camera.world.scale_y *= factor
-        self._autoscale_enabled = False
 
     # ------------------------------------------------------------------
     # Mouse hover tooltip

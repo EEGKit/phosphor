@@ -106,15 +106,6 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
 
         layout.addWidget(self._make_separator())
 
-        # Autoscale toggle.
-        self._btn_auto = QtWidgets.QToolButton()
-        self._btn_auto.setText("Auto")
-        self._btn_auto.setCheckable(True)
-        self._btn_auto.setChecked(plot._autoscale_enabled)
-        self._btn_auto.setToolTip("Toggle camera autoscale (key: A)")
-        self._btn_auto.toggled.connect(self._on_auto_toggled)
-        layout.addWidget(self._btn_auto)
-
         # Channel-label toggle. The labels sit on opaque chips, so on a dense
         # trace they cover signal; once the user knows which channel is which,
         # they mostly want them gone.
@@ -125,7 +116,7 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
         self._btn_labels.setToolTip("Show per-channel labels over the traces")
         self._btn_labels.toggled.connect(self._plot.set_channel_labels_visible)
         layout.addWidget(self._btn_labels)
-        self._mark_slot("autoscale", layout)
+        self._mark_slot("labels", layout)
 
         self.add_controls(layout)
         layout.addStretch(1)
@@ -152,7 +143,7 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
         """Insert *widget* immediately after a named group.
 
         Slots are ``"channel"``, ``"visible"``, ``"amplitude"``, ``"time"``
-        (absent unless the plot supports time zoom), ``"autoscale"``, and
+        (absent unless the plot supports time zoom), ``"labels"``, and
         ``"end"``. Later slots shift as earlier ones grow, so inserting is
         order-independent.
 
@@ -231,13 +222,6 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
         buf.set_n_visible(min(buf.n_channels, buf.n_visible * 2))
         self._plot._update_range_label()
 
-    # ---- autoscale ----------------------------------------------------
-
-    def _on_auto_toggled(self, on: bool) -> None:
-        self._plot._autoscale_enabled = on
-        if on:
-            self._plot._apply_auto_scale()
-
     # ---- periodic resync ---------------------------------------------
 
     def _sync_from_buffer(self) -> None:
@@ -249,10 +233,6 @@ class ChannelPlotControlsWidget(QtWidgets.QWidget):
             self._spin_visible.setRange(1, buf.n_channels)
             self._spin_visible.setValue(buf.n_visible)
             self._spin_visible.blockSignals(False)
-        if self._btn_auto.isChecked() != self._plot._autoscale_enabled:
-            self._btn_auto.blockSignals(True)
-            self._btn_auto.setChecked(self._plot._autoscale_enabled)
-            self._btn_auto.blockSignals(False)
         if self._btn_labels.isChecked() != self._plot.channel_labels_visible:
             self._btn_labels.blockSignals(True)
             self._btn_labels.setChecked(self._plot.channel_labels_visible)
