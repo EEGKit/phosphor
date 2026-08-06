@@ -36,7 +36,7 @@ class XAxisWidget(QWidget):
         self._log = False
         self.setFixedHeight(24)
         bg = BG_COLOR
-        self.setStyleSheet(f"background-color: rgb({int(bg[0]*255)},{int(bg[1]*255)},{int(bg[2]*255)});")
+        self.setStyleSheet(f"background-color: rgb({int(bg[0] * 255)},{int(bg[1] * 255)},{int(bg[2] * 255)});")
 
     def set_range(self, range_max: float) -> None:
         self._range_max = range_max

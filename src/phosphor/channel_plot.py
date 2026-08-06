@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import logging
+
 import fastplotlib as fpl
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QLabel, QToolTip, QVBoxLayout, QWidget
 
 from .constants import CHANNEL_COLORS
+from .overlays import ChannelLabelOverlay, ScaleBarOverlay
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["ChannelPlotWidget"]
 
@@ -15,7 +20,7 @@ class ChannelPlotWidget(QWidget):
     """Base widget for fastplotlib-rendered multichannel plots.
 
     Provides canvas setup, channel scrolling (scroll / ↑↓ / PgUp/PgDn / [ ]),
-    amplitude zoom (Shift+scroll / - = A), and range label overlay.
+    amplitude zoom (Shift+scroll / - =), and range label overlay.
 
     Subclass contract:
 
@@ -40,7 +45,6 @@ class ChannelPlotWidget(QWidget):
         super().__init__(parent)
         self._n_channels = n_channels
         self._channel_labels = channel_labels
-        self._autoscale_enabled = True
 
         # Layout
         layout = QVBoxLayout(self)
@@ -66,6 +70,20 @@ class ChannelPlotWidget(QWidget):
 
         # _buffer is set by the subclass before calling _init_rendering()
         self._buffer = None
+
+        # Overlays, created on demand. Kept as None until asked for so a plot
+        # that never wants them pays nothing.
+        self._label_overlay: ChannelLabelOverlay | None = None
+        self._scale_bar_overlay: ScaleBarOverlay | None = None
+        # Cached world->screen-y projection, keyed on the inputs that can change
+        # it. map_world_to_screen is a pygfx round-trip; at 60 fps it is worth
+        # not repeating while nothing has moved.
+        self._projection: tuple[float, float] | None = None
+        self._projection_key: tuple | None = None
+        self._scale_bar_text: str = ""
+        # Identity of the label list last pushed to the overlay, so a relabel
+        # via update_config is picked up without copying the list every frame.
+        self._label_source: object = None
 
     # ------------------------------------------------------------------
     # Subclass hook: call after buffer is ready
@@ -106,7 +124,14 @@ class ChannelPlotWidget(QWidget):
         raise NotImplementedError
 
     def _apply_auto_scale(self) -> None:
-        """Set camera to fit content. Override in subclass for fast path."""
+        """Frame the camera on the current content. Override for a fast path.
+
+        Called every frame, unconditionally. It is the only thing that moves
+        the camera -- ``_init_rendering`` disables the pan/zoom controller --
+        so skipping it does not hand control to the user, it strands the view.
+        Time and amplitude zoom work by changing what the data occupies and
+        letting this follow.
+        """
         self._subplot.auto_scale(maintain_aspect=False, zoom=1.0)
 
     def _on_ctrl_scroll(self, delta: float) -> None:
@@ -118,8 +143,152 @@ class ChannelPlotWidget(QWidget):
 
     def _animation_callback(self) -> None:
         self._update_graphics()
-        if self._autoscale_enabled:
-            self._apply_auto_scale()
+        self._apply_auto_scale()
+        self._sync_overlays()
+
+    # ------------------------------------------------------------------
+    # Overlays
+    # ------------------------------------------------------------------
+
+    def set_channel_labels(self, labels: list[str] | None) -> None:
+        """Replace the per-channel labels used by the tooltip and the overlay.
+
+        Labels often arrive after the plot is built -- a source announces its
+        channel names on its own schedule -- so this exists to avoid callers
+        assigning to ``_channel_labels`` and hoping the overlay notices.
+        """
+        self._channel_labels = list(labels) if labels is not None else None
+        self._push_channel_labels()
+
+    @property
+    def channel_labels_visible(self) -> bool:
+        """Whether per-trace identifiers are currently drawn."""
+        return self._label_overlay is not None and self._label_overlay.isVisible()
+
+    def set_channel_labels_visible(self, visible: bool) -> None:
+        """Show or hide per-trace identifiers drawn over the canvas.
+
+        Uses the ``channel_labels`` the plot was configured with. Positioning
+        and font sizing follow the live camera, so labels stay on their traces
+        as the user scrolls, pages, or zooms.
+
+        Worth having a way to turn off: the labels sit on opaque chips, so on a
+        dense trace they cover signal, and once the user knows which channel is
+        which they mostly want them gone.
+        """
+        if not visible:
+            if self._label_overlay is not None:
+                self._label_overlay.hide()
+            return
+        if self._label_overlay is None:
+            self._label_overlay = ChannelLabelOverlay(self._fpl_widget)
+            self._label_overlay.setGeometry(self._fpl_widget.rect())
+        self._push_channel_labels()
+        self._label_overlay.show()
+        self._label_overlay.raise_()
+        self._sync_overlays()
+
+    def set_scale_bar_text(self, text: str | None) -> None:
+        """Show a calibration bar one row-height tall, labelled *text*.
+
+        The caller supplies the text because what a row-height means depends on
+        the signal's units, which this widget does not know. ``None`` or an
+        empty string hides the bar.
+        """
+        if not text:
+            if self._scale_bar_overlay is not None:
+                self._scale_bar_overlay.set_bar(0.0, "")
+                self._scale_bar_overlay.hide()
+            return
+        if self._scale_bar_overlay is None:
+            self._scale_bar_overlay = ScaleBarOverlay(self._fpl_widget)
+            self._scale_bar_overlay.setGeometry(self._fpl_widget.rect())
+        self._scale_bar_text = text
+        self._scale_bar_overlay.show()
+        self._scale_bar_overlay.raise_()
+        self._sync_overlays()
+
+    def _push_channel_labels(self) -> None:
+        """Forward the plot's labels to the overlay when they have been replaced.
+
+        Keyed on identity rather than value: update_config swaps the list, and
+        comparing 256 strings every frame to notice would cost more than the
+        feature does.
+        """
+        if self._label_overlay is None or self._channel_labels is self._label_source:
+            return
+        self._label_source = self._channel_labels
+        self._label_overlay.set_labels(list(self._channel_labels or []))
+
+    def _screen_y_projection(self) -> tuple[float | None, float | None]:
+        """Affine ``screen_y = y0 + slope * world_y`` for the current camera.
+
+        Returns ``(None, None)`` if the camera cannot be probed, which the
+        overlay handles by falling back to its analytic layout.
+        """
+        subplot = getattr(self, "_subplot", None)
+        if subplot is None:
+            return None, None
+        buf = self._buffer
+        size = self._fpl_widget.size()
+        camera = getattr(subplot, "camera", None)
+        key = (
+            size.width(),
+            size.height(),
+            getattr(buf, "n_visible", None),
+            getattr(self, "_z_offset_scale", 1.0),
+            float(camera.height) if camera is not None else None,
+            float(camera.world.position[1]) if camera is not None else None,
+        )
+        if self._projection is not None and key == self._projection_key:
+            return self._projection
+
+        try:
+            # x is irrelevant to screen-y for the axis-aligned ortho camera.
+            y_at_0 = float(subplot.map_world_to_screen((0.0, 0.0, 0.0))[1])
+            y_at_1 = float(subplot.map_world_to_screen((0.0, 1.0, 0.0))[1])
+        except Exception:  # noqa: BLE001 - pygfx call with no enumerated failures
+            # In a paint path: losing the labels' precise placement is better
+            # than losing the frame.
+            logger.debug("map_world_to_screen failed; overlays fall back to analytic layout", exc_info=True)
+            return None, None
+
+        self._projection = (y_at_0, y_at_1 - y_at_0)
+        self._projection_key = key
+        return self._projection
+
+    def _sync_overlays(self) -> None:
+        """Keep overlays sized to the canvas and in step with the view."""
+        if self._label_overlay is None and self._scale_bar_overlay is None:
+            return
+        rect = self._fpl_widget.rect()
+        for overlay in (self._label_overlay, self._scale_bar_overlay):
+            if overlay is not None and overlay.size() != self._fpl_widget.size():
+                overlay.setGeometry(rect)
+
+        buf = self._buffer
+        if buf is None:
+            return
+        y0, slope = self._screen_y_projection()
+        z_scale = getattr(self, "_z_offset_scale", 1.0) or 1.0
+
+        if self._label_overlay is not None:
+            self._push_channel_labels()
+            self._label_overlay.set_view(
+                getattr(buf, "channel_offset", 0),
+                getattr(buf, "n_visible", 0),
+                getattr(buf, "channel_order", "top_down") == "top_down",
+                y0,
+                slope,
+                z_scale,
+            )
+
+        if self._scale_bar_overlay is not None:
+            text = self._scale_bar_text
+            # A row spans ±0.5 in normalized units, so half a row's world
+            # distance is the bar the caller's text describes.
+            length = 0.0 if slope is None else 0.5 * abs(slope)
+            self._scale_bar_overlay.set_bar(length, text)
 
     # ------------------------------------------------------------------
     # Event handlers (fpl native events)
@@ -150,11 +319,6 @@ class ChannelPlotWidget(QWidget):
             self._zoom_amplitude(0.8)
         elif key == "=":
             self._zoom_amplitude(1.25)
-
-        elif key in ("a", "A"):
-            self._autoscale_enabled = not self._autoscale_enabled
-            if self._autoscale_enabled:
-                self._apply_auto_scale()
 
         self._update_range_label()
 
@@ -194,6 +358,36 @@ class ChannelPlotWidget(QWidget):
             self._renderer.remove_event_handler(self._on_wheel_event, "wheel")
             self._renderer.remove_event_handler(self._on_pointer_move_event, "pointer_move")
 
+    def set_max_fps(self, fps: float | None) -> None:
+        """Cap the canvas render rate.
+
+        A scrolling trace reads smooth well below the display refresh, and
+        render cost falls roughly in proportion, so this is the cheapest
+        performance knob a caller has. ``None`` leaves whatever rendercanvas
+        was already doing; ``fps <= 0`` uncaps (``update_mode="fastest"``).
+
+        Safe to call before or after the canvas exists; a backend that predates
+        ``set_update_mode`` is warned about once and otherwise ignored, since
+        losing the cap is a performance regression rather than a broken plot.
+        """
+        if fps is None:
+            return
+        canvas = getattr(self._figure, "canvas", None)
+        set_update_mode = getattr(canvas, "set_update_mode", None)
+        if set_update_mode is None:
+            logger.warning("Canvas has no set_update_mode; leaving the render rate at its default.")
+            return
+        try:
+            if fps <= 0:
+                set_update_mode("fastest")
+            else:
+                # "continuous" is the mode that honours max_fps; "ondemand"
+                # ignores it and redraws only on events, which a live sweep
+                # would then never do.
+                set_update_mode("continuous", max_fps=float(fps))
+        except Exception:
+            logger.exception("Failed to set the canvas render rate; leaving it at its default.")
+
     # ------------------------------------------------------------------
     # Amplitude zoom helper
     # ------------------------------------------------------------------
@@ -211,7 +405,6 @@ class ChannelPlotWidget(QWidget):
             return
         camera = self._subplot.camera
         camera.world.scale_y *= factor
-        self._autoscale_enabled = False
 
     # ------------------------------------------------------------------
     # Mouse hover tooltip
@@ -245,7 +438,7 @@ class ChannelPlotWidget(QWidget):
         label = labels[abs_ch] if labels and abs_ch < len(labels) else f"Ch {abs_ch}"
 
         rgba = CHANNEL_COLORS[ch_index % len(CHANNEL_COLORS)]
-        hex_color = f"#{int(rgba[0]*255):02x}{int(rgba[1]*255):02x}{int(rgba[2]*255):02x}"
+        hex_color = f"#{int(rgba[0] * 255):02x}{int(rgba[1] * 255):02x}{int(rgba[2] * 255):02x}"
         html = f'<span style="color:{hex_color}">\u25a0</span> {label}'
         from PySide6.QtCore import QPoint
 

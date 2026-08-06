@@ -8,6 +8,10 @@ DEFAULT_MAX_FPS = 60
 CURSOR_GAP_COLUMNS = 5
 BG_COLOR = (0.10, 0.10, 0.12, 1.0)
 CURSOR_COLOR = (0.25, 0.25, 0.28, 0.85)
+# Cursor line width in pixels. The geometry-derived width is in time-world
+# units and collapses to roughly one pixel, which is hard to see against a
+# dense trace; this is applied on top.
+CURSOR_THICKNESS = 2.0
 
 DEFAULT_MAX_EVENTS = 500  # max stored events (deque capacity)
 EVENT_POOL_SIZE = 64  # max simultaneously rendered event ticks
